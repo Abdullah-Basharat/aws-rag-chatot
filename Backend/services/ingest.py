@@ -1,7 +1,11 @@
 import os
 import tempfile
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    Docx2txtLoader,
+    TextLoader,
+)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from .postgres_db import get_all_pdfs, get_pdfs_by_user, ingest
@@ -12,6 +16,22 @@ from . import s3_storage
 load_dotenv(".env")
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+
+
+def _load_documents(path: str):
+    """
+    Load documents from a local file path, supporting PDF, DOCX and TXT.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        loader = PyPDFLoader(path)
+    elif ext in {".docx"}:
+        loader = Docx2txtLoader(path)
+    elif ext in {".txt"}:
+        loader = TextLoader(path, encoding="utf-8")
+    else:
+        raise ValueError(f"Unsupported file extension for ingestion: {ext}")
+    return loader.load()
 
 
 ####################################
@@ -34,8 +54,7 @@ def ingest_all_pdfs():
         try:
             tmp_path = s3_storage.download_to_temp(key)
             try:
-                loader = PyPDFLoader(tmp_path)
-                docs = loader.load()
+                docs = _load_documents(tmp_path)
                 chunks = splitter.split_documents(docs)
                 for c in chunks:
                     c.metadata = {
@@ -70,8 +89,7 @@ def ingest_one_pdf_admin(filename: str, user_id: str = None):
     try:
         tmp_path = s3_storage.download_to_temp(file_key)
         try:
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
+            docs = _load_documents(tmp_path)
             chunks = splitter.split_documents(docs)
             if user_id:
                 meta_user = user_id
@@ -111,8 +129,7 @@ def ingest_one_pdf_public(filename: str):
     try:
         tmp_path = s3_storage.download_to_temp(file_key)
         try:
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
+            docs = _load_documents(tmp_path)
             chunks = splitter.split_documents(docs)
             for c in chunks:
                 c.metadata = {
@@ -148,8 +165,7 @@ def ingest_one_pdf_private(filename: str, user_id: str):
     try:
         tmp_path = s3_storage.download_to_temp(file_key)
         try:
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
+            docs = _load_documents(tmp_path)
             chunks = splitter.split_documents(docs)
             for c in chunks:
                 c.metadata = {

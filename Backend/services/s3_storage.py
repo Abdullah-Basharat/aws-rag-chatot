@@ -65,3 +65,16 @@ def delete_object(key: str) -> bool:
         return False
 
 
+def put_text_object(key: str, content: str) -> str:
+    """
+    Upload a small text payload to S3 under the given key.
+
+    This is used by the logging subsystem to store event logs in S3
+    rather than on the local filesystem, keeping application nodes stateless.
+    """
+    if not S3_BUCKET:
+        raise RuntimeError("S3_BUCKET_NAME is not configured in the environment.")
+    client = _s3_client()
+    client.put_object(Bucket=S3_BUCKET, Key=key, Body=content.encode("utf-8"))
+    return key
+

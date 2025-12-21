@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.42.14",
+    "bcrypt>=4.2.0",
     "fastapi>=0.126.0",
     "langchain-community>=0.4.1",
     "langchain-openai>=1.1.6",

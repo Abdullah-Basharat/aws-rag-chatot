@@ -51,13 +51,47 @@ def user_auth_check(credentials: HTTPBasicCredentials = Depends(verify_user_cred
 
 
 ######################################
-# User login (simple username/password)
+# User registration & login
 ######################################
+
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+    registration_code: str
 
 
 class UserLogin(BaseModel):
     username: str
     password: str
+
+
+@router.post("/user/register")
+def user_register(user: UserRegister):
+    """
+    Self-service user registration using a pre-shared registration code.
+
+    Example: admin shares a one-time code like 'abc123' with a new user.
+    The user calls this endpoint with that code and their desired password.
+    """
+    expected_code = os.getenv("REGISTRATION_CODE", "")
+    if not expected_code:
+        # Registration disabled until a code is configured
+        raise HTTPException(
+            status_code=503,
+            detail="User self-registration is disabled. Please contact an administrator.",
+        )
+    if user.registration_code != expected_code:
+        log_event(user.username, "user_register", "invalid_registration_code")
+        raise HTTPException(status_code=400, detail="Invalid registration code.")
+
+    created = db.add_user(user.username, user.password)
+    if not created:
+        log_event(user.username, "user_register", "user_already_exists")
+        raise HTTPException(status_code=400, detail="User already exists.")
+
+    log_event(user.username, "user_register", "success")
+    return {"success": True, "user_id": user.username}
 
 
 @router.post("/user/login")
@@ -86,12 +120,16 @@ def upload_pdf(
     is_public: int = Form(0),
 ):
     """
-    Upload PDFs to S3 instead of local disk.
+    Upload documents to S3 instead of local disk.
+
+    Supported types: PDF, DOCX, TXT.
     The database stores the S3 key in the `filepath` column.
     """
+    allowed_ext = {".pdf", ".docx", ".txt"}
     uploaded = []
     for file in files:
-        if not file.filename.lower().endswith(".pdf"):
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in allowed_ext:
             continue
         if is_public:
             s3_key = os.path.join("public", file.filename)
@@ -102,9 +140,16 @@ def upload_pdf(
         # Store S3 key in DB
         db.add_pdf(file.filename, credentials.username, is_public, s3_key)
         uploaded.append(file.filename)
-        log_event(credentials.username, "upload_pdf", f"filename={file.filename}, is_public={is_public}")
+        log_event(
+            credentials.username,
+            "upload_pdf",
+            f"filename={file.filename}, is_public={is_public}",
+        )
     if not uploaded:
-        raise HTTPException(status_code=400, detail="No valid PDFs uploaded.")
+        raise HTTPException(
+            status_code=400,
+            detail="No valid documents uploaded. Allowed types: PDF, DOCX, TXT.",
+        )
     return {"uploaded": uploaded}
 
 
@@ -272,6 +317,9 @@ async def chat(req: ChatRequest, credentials: HTTPBasicCredentials = Depends(ver
     """
 
     response = await asyncio.to_thread(chatmodel.predict, prompt)
+    # Save assistant response in history as well
+    await asyncio.to_thread(vectordb.save_assistant_message, user_id, response)
+
     log_event(user_id, "user_chat", f"message={req.message}")
     return {"response": response, "prompt": prompt}
 

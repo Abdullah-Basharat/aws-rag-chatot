@@ -132,8 +132,11 @@ elif menu == "Chat Management":
                     history = res.json().get("history", [])
                     if history:
                         st.write(f"Chat History for **{selected_user}**:")
-                        for msg in history:
-                            st.text(f"- {msg}")
+                        for turn in history:
+                            role = turn.get("role", "user")
+                            msg = turn.get("message", "")
+                            who = "User" if role == "user" else "Assistant"
+                            st.text(f"{who}: {msg}")
                     else:
                         st.info(f"No chat history found for '{selected_user}'.")
                 else:

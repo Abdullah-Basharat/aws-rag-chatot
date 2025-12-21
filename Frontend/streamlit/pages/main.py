@@ -67,6 +67,33 @@ if not st.session_state['logged_in']:
     login_password = st.sidebar.text_input("Password", type="password", key="login_password")
     if st.sidebar.button("Login", key="login_button"):
         login(login_role, login_username, login_password)
+
+    with st.expander("New user? Register with a shared code"):
+        reg_username = st.text_input("New username", key="reg_username")
+        reg_password = st.text_input("New password", type="password", key="reg_password")
+        reg_code = st.text_input("Registration code (provided by admin)", type="password", key="reg_code")
+        if st.button("Register", key="register_button"):
+            if not reg_username or not reg_password or not reg_code:
+                st.warning("Please fill in username, password, and registration code.")
+            else:
+                try:
+                    res = requests.post(
+                        f"{BASE_URL}/user/register",
+                        json={
+                            "username": reg_username,
+                            "password": reg_password,
+                            "registration_code": reg_code,
+                        },
+                    )
+                    if res.status_code == 200:
+                        st.success("Registration successful. You can now log in as a user.")
+                    else:
+                        st.error(f"Registration failed: {res.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error(f"Connection Error: Is the backend server running at {BASE_URL}?")
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {e}")
+
     st.info("Please log in to access the dashboards.")
 else:
     st.sidebar.header(f"Welcome, {st.session_state['username']}!")

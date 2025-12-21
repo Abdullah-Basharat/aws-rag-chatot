@@ -38,7 +38,7 @@ def _pg_connection_string() -> str:
 def _user_history_store(user_id: str) -> PGVector:
     """
     PGVector store for a single user's chat history.
-    We keep per-user collections for compatibility with the previous Chroma design.
+    We keep per-user collections.
     """
     return PGVector(
         collection_name=f"user_{user_id}",
@@ -56,19 +56,27 @@ def save_user_message(user_id: str, message: str) -> None:
     """
     # Persist ordered history in relational DB
     with postgres_db.get_db_connection() as conn, conn.cursor() as cur:
+        # Ensure table and role column exist
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_history (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
                 message TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
         cur.execute(
-            "INSERT INTO chat_history (user_id, message) VALUES (%s, %s);",
-            (user_id, message),
+            """
+            ALTER TABLE chat_history
+            ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+            """
+        )
+        cur.execute(
+            "INSERT INTO chat_history (user_id, role, message) VALUES (%s, %s, %s);",
+            (user_id, "user", message),
         )
         # Enforce history limit per user
         cur.execute(
@@ -91,22 +99,92 @@ def save_user_message(user_id: str, message: str) -> None:
     db.add_documents([doc])
 
 
-def retrieve_user_memory(user_id: str, query: str, k: int = 3) -> List[Document]:
-    db = _user_history_store(user_id)
-    results = db.similarity_search(query, k=k)
-    # Filter out any docs with missing/empty page_content
-    return [doc for doc in results if getattr(doc, "page_content", None)]
-
-
-def get_all_history(user_id: str) -> List[str]:
+def save_assistant_message(user_id: str, message: str) -> None:
     """
-    Return ordered plain-text history for a user (oldest → newest),
-    similar to the original sqlite + Chroma implementation.
+    Save an assistant (AI) message to the ordered history table.
+
+    We do not currently embed assistant messages into pgvector; only user
+    messages are used for semantic memory, which is usually sufficient.
     """
     with postgres_db.get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                message TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE chat_history
+            ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+            """
+        )
+        cur.execute(
+            "INSERT INTO chat_history (user_id, role, message) VALUES (%s, %s, %s);",
+            (user_id, "assistant", message),
+        )
+        conn.commit()
+
+
+def retrieve_user_memory(user_id: str, query: str, k: int = 3) -> List[Document]:
+    """
+    Retrieve chat history for RAG, combining:
+    - most recent messages (recency)
+    - semantically similar messages (relevance via pgvector)
+    """
+    db = _user_history_store(user_id)
+    semantic_results = db.similarity_search(query, k=k)
+
+    # Get recent ordered history from relational DB
+    recent_texts: List[str] = []
+    with postgres_db.get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
             SELECT message
+            FROM chat_history
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s;
+            """,
+            (user_id, CHAT_HISTORY_LIMIT),
+        )
+        rows = cur.fetchall()
+        recent_texts = [row[0] for row in rows]
+
+    recent_docs = [
+        Document(page_content=msg, metadata={"user_id": user_id, "source": "recent"})
+        for msg in recent_texts
+    ]
+
+    # Merge, preferring recent messages while avoiding duplicates
+    merged: List[Document] = []
+    seen_contents = set()
+    for doc in recent_docs + semantic_results:
+        content = getattr(doc, "page_content", None)
+        if not content or content in seen_contents:
+            continue
+        seen_contents.add(content)
+        merged.append(doc)
+
+    return merged[:k]
+
+
+def get_all_history(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Return ordered history for a user (oldest → newest) including role info.
+
+    Each entry has the shape:
+    { "role": "user" | "assistant", "message": "...", "created_at": "<iso8601>" }
+    """
+    with postgres_db.get_db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT role, message, created_at
             FROM chat_history
             WHERE user_id = %s
             ORDER BY created_at ASC;
@@ -114,7 +192,16 @@ def get_all_history(user_id: str) -> List[str]:
             (user_id,),
         )
         rows = cur.fetchall()
-        return [row[0] for row in rows]
+        history: List[Dict[str, Any]] = []
+        for role, message, created_at in rows:
+            history.append(
+                {
+                    "role": role or "user",
+                    "message": message,
+                    "created_at": created_at.isoformat() if created_at else None,
+                }
+            )
+        return history
 
 
 def clear_history_by_user(user_id: str) -> None:

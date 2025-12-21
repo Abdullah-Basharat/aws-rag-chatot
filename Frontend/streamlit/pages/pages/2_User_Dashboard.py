@@ -72,16 +72,21 @@ if menu == "Chat":
                 payload = {"user_id": username, "message": prompt}
                 res = requests.post(f"{BASE_URL}/user/chat", json=payload, auth=auth)
                 if res.status_code == 200:
-                    full_response = "Answer : \n" + res.json().get("response", "Sorry, I encountered an error.") + "\n\n Prompt \n" + res.json().get("prompt", "Sorry, I encountered an error.")
+                    # Only show the model's answer to the user; do not display the internal prompt.
+                    full_response = res.json().get(
+                        "response", "Sorry, I encountered an error."
+                    )
                 else:
                     full_response = f"Error: {res.text}"
             except Exception as e:
                 full_response = f"An error occurred: {e}"
-            
+
             message_placeholder.markdown(full_response)
-        
+
         # Add assistant response to chat history
-        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+        st.session_state.chat_history.append(
+            {"role": "assistant", "content": full_response}
+        )
 
 # --- Data Management ---
 elif menu == "Data Management":

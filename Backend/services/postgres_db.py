@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import bcrypt
 
 
 load_dotenv()
@@ -39,8 +40,16 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     userid TEXT UNIQUE NOT NULL,
-                    password TEXT NOT NULL
+                    password TEXT NOT NULL,
+                    is_admin INTEGER DEFAULT 0
                 );
+                """
+            )
+            # Ensure is_admin exists for older databases
+            cur.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS is_admin INTEGER DEFAULT 0;
                 """
             )
 
@@ -75,16 +84,53 @@ def init_db() -> None:
 
 
 ######################################
+# password helpers
+######################################
+
+
+def _hash_password(plain_password: str) -> str:
+    """Hash a plaintext password using bcrypt."""
+    return bcrypt.hashpw(plain_password.encode("utf-8"), bcrypt.gensalt()).decode(
+        "utf-8"
+    )
+
+
+def _verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plaintext password against a stored hash.
+
+    For backward compatibility, if the stored password does not look like a
+    bcrypt hash, fall back to direct string comparison (legacy plaintext).
+    """
+    if not hashed_password:
+        return False
+    # bcrypt hashes start with $2b$, $2a$, etc.
+    if hashed_password.startswith("$2"):
+        try:
+            return bcrypt.checkpw(
+                plain_password.encode("utf-8"), hashed_password.encode("utf-8")
+            )
+        except ValueError:
+            return False
+    # Legacy plaintext fallback
+    return plain_password == hashed_password
+
+
+######################################
 # users
 ######################################
 
 
 def add_user(userid: str, password: str, is_admin: int = 0) -> bool:
+    """
+    Create a new user with a securely hashed password.
+    """
+    hashed = _hash_password(password)
     try:
         with get_db_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO users (userid, password) VALUES (%s, %s);",
-                (userid, password),
+                "INSERT INTO users (userid, password, is_admin) VALUES (%s, %s, %s);",
+                (userid, hashed, is_admin),
             )
         return True
     except psycopg2.IntegrityError:
@@ -99,19 +145,27 @@ def delete_user(userid: str) -> bool:
 
 
 def authenticate_user(userid: str, password: str) -> bool:
+    """
+    Authenticate a user by verifying the provided password against the stored hash.
+    """
     with get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM users WHERE userid = %s AND password = %s;",
-            (userid, password),
+            "SELECT password FROM users WHERE userid = %s;",
+            (userid,),
         )
-        return cur.fetchone() is not None
+        row = cur.fetchone()
+        if not row:
+            return False
+        stored_password = row[0]
+        return _verify_password(password, stored_password)
 
 
 def update_user_password(userid: str, new_password: str) -> bool:
+    hashed = _hash_password(new_password)
     with get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE users SET password = %s WHERE userid = %s;",
-            (new_password, userid),
+            (hashed, userid),
         )
         updated = cur.rowcount > 0
     return updated

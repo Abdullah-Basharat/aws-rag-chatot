@@ -128,12 +128,16 @@ def upload_pdf(
     credentials: HTTPBasicCredentials = Depends(verify_admin_credentials),
 ):
     """
-    Upload PDFs to S3 instead of local disk.
+    Upload documents to S3 instead of local disk.
+
+    Supported types: PDF, DOCX, TXT.
     The database stores the S3 key in the `filepath` column.
     """
+    allowed_ext = {".pdf", ".docx", ".txt"}
     uploaded = []
     for file in files:
-        if not file.filename.lower().endswith(".pdf"):
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in allowed_ext:
             continue
         uploaded_by = "admin"
         if is_public:
@@ -145,9 +149,16 @@ def upload_pdf(
         # Store S3 key in DB
         db.add_pdf(file.filename, uploaded_by, is_public, s3_key)
         uploaded.append(file.filename)
-        log_event(credentials.username, "admin_upload_pdf", f"filename={file.filename}, is_public={is_public}")
+        log_event(
+            credentials.username,
+            "admin_upload_pdf",
+            f"filename={file.filename}, is_public={is_public}",
+        )
     if not uploaded:
-        raise HTTPException(status_code=400, detail="No valid PDFs uploaded.")
+        raise HTTPException(
+            status_code=400,
+            detail="No valid documents uploaded. Allowed types: PDF, DOCX, TXT.",
+        )
     return {"uploaded": uploaded}
 
 
