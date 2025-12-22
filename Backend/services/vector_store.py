@@ -133,45 +133,32 @@ def save_assistant_message(user_id: str, message: str) -> None:
 
 def retrieve_user_memory(user_id: str, query: str, k: int = 3) -> List[Document]:
     """
-    Retrieve chat history for RAG, combining:
-    - most recent messages (recency)
-    - semantically similar messages (relevance via pgvector)
+    Retrieve previous conversation turns for RAG from the relational history only.
     """
-    db = _user_history_store(user_id)
-    semantic_results = db.similarity_search(query, k=k)
-
-    # Get recent ordered history from relational DB
-    recent_texts: List[str] = []
     with postgres_db.get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT message
+            SELECT role, message
             FROM chat_history
             WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT %s;
             """,
-            (user_id, CHAT_HISTORY_LIMIT),
+            (user_id, 3),
         )
         rows = cur.fetchall()
-        recent_texts = [row[0] for row in rows]
 
-    recent_docs = [
-        Document(page_content=msg, metadata={"user_id": user_id, "source": "recent"})
-        for msg in recent_texts
-    ]
-
-    # Merge, preferring recent messages while avoiding duplicates
-    merged: List[Document] = []
-    seen_contents = set()
-    for doc in recent_docs + semantic_results:
-        content = getattr(doc, "page_content", None)
-        if not content or content in seen_contents:
-            continue
-        seen_contents.add(content)
-        merged.append(doc)
-
-    return merged[:k]
+    docs: List[Document] = []
+    # We build documents in chronological order (oldest → newest)
+    for role, message in reversed(rows):
+        content = f"{role or 'user'}: {message}"
+        docs.append(
+            Document(
+                page_content=content,
+                metadata={"user_id": user_id, "source": "chat_history", "role": role},
+            )
+        )
+    return docs[:k]
 
 
 def get_all_history(user_id: str) -> List[Dict[str, Any]]:

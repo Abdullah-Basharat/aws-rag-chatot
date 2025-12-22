@@ -3,10 +3,12 @@ Plain Python load testing script for the AWS RAG Chatbot backend.
 
 It can be run from a local Windows machine to simulate many concurrent users
 logging in and sending chat messages to the FastAPI backend.
+
+Latency measurements have been removed per user request; the script now
+focuses only on success/failure counts.
 """
 
 import argparse
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List
@@ -18,7 +20,6 @@ from requests.auth import HTTPBasicAuth
 @dataclass
 class RequestResult:
     ok: bool
-    latency_ms: float
     status_code: int
     error: str | None = None
 
@@ -54,13 +55,10 @@ def user_scenario(
     results: List[RequestResult] = []
 
     # Login check
-    t0 = time.perf_counter()
     resp = requests.get(f"{base_url}/user/auth/check", auth=auth)
-    t1 = time.perf_counter()
     results.append(
         RequestResult(
             ok=resp.status_code == 200,
-            latency_ms=(t1 - t0) * 1000,
             status_code=resp.status_code,
             error=None if resp.status_code == 200 else resp.text,
         )
@@ -71,13 +69,10 @@ def user_scenario(
     # Chat messages
     for i in range(messages):
         payload = {"user_id": username, "message": f"Test message {i+1} from {username}"}
-        t0 = time.perf_counter()
         resp = requests.post(f"{base_url}/user/chat", json=payload, auth=auth)
-        t1 = time.perf_counter()
         results.append(
             RequestResult(
                 ok=resp.status_code == 200,
-                latency_ms=(t1 - t0) * 1000,
                 status_code=resp.status_code,
                 error=None if resp.status_code == 200 else resp.text,
             )
@@ -111,13 +106,10 @@ def run_load_test(
 
 
 def summarize_results(results: List[RequestResult]) -> None:
-    import statistics
-
     if not results:
         print("No requests were executed.")
         return
 
-    latencies = [r.latency_ms for r in results]
     successes = [r for r in results if r.ok]
     failures = [r for r in results if not r.ok]
 
@@ -125,12 +117,6 @@ def summarize_results(results: List[RequestResult]) -> None:
     print(f"Total requests: {len(results)}")
     print(f"Successful: {len(successes)}")
     print(f"Failed: {len(failures)}")
-    print(
-        f"Latency (ms): min={min(latencies):.1f}, "
-        f"avg={statistics.mean(latencies):.1f}, "
-        f"p95={statistics.quantiles(latencies, n=20)[18]:.1f}, "
-        f"max={max(latencies):.1f}"
-    )
     if failures:
         print("\nSample failures (up to 5):")
         for r in failures[:5]:
@@ -202,7 +188,6 @@ def main() -> None:
         f"Running load test: {args.num_users} users, "
         f"{args.messages_per_user} messages each, base URL={args.base_url}"
     )
-    start = time.perf_counter()
     results = run_load_test(
         args.base_url,
         args.num_users,
@@ -210,8 +195,7 @@ def main() -> None:
         args.user_prefix,
         args.user_password,
     )
-    duration = time.perf_counter() - start
-    print(f"Completed in {duration:.1f} seconds.")
+    print("Completed load test.")
     summarize_results(results)
 
 
