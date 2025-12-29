@@ -16,6 +16,7 @@ ENV PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
 COPY pyproject.toml uv.lock* ./
 COPY Backend ./Backend
 COPY Frontend ./Frontend
+COPY .streamlit ./.streamlit
 COPY start.sh ./
 
 # Sync all dependencies using uv
