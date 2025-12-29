@@ -1,7 +1,14 @@
 [server]
-enableCORS = false
-enableXsrfProtection = false
-enableWebsocketCompression = false
 headless = true
 port = 8501
 address = "0.0.0.0"
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+serverAddress = "0.0.0.0"
+gatherUsageStats = false
+
+[runner]
+magicEnabled = true
+fastReruns = true
