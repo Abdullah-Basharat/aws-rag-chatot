@@ -2,6 +2,9 @@ import streamlit as st
 import requests
 from requests.auth import HTTPBasicAuth
 import os
+from dotenv import load_dotenv
+# Load environment variables from .env file
+load_dotenv()
 
 # --- Configuration ---
 BASE_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
