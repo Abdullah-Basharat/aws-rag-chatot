@@ -79,6 +79,24 @@ def init_db() -> None:
                 );
                 """
             )
+            
+            cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                message TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+            cur.execute(
+                """
+                ALTER TABLE chat_history
+                ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+                """
+            )
 
         conn.commit()
 
