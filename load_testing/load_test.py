@@ -1,205 +1,127 @@
 """
-Plain Python load testing script for the AWS RAG Chatbot backend.
-
-It can be run from a local Windows machine to simulate many concurrent users
-logging in and sending chat messages to the FastAPI backend.
-
-Latency measurements have been removed per user request; the script now
-focuses only on success/failure counts.
+ECS Auto-Scaling Load Test for RAG App
+--------------------------------------
+Simulates users ramping from 0 → TOTAL_USERS over a ramp duration,
+holds high load for sustained period, then ramps down.
+Prints all request results to console.
 """
 
-import argparse
+import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List
-
 import requests
 from requests.auth import HTTPBasicAuth
 
+# ================= CONFIG =================
+BASE_URL = "http://rag-chatbot-alb-v1-2019164371.us-east-1.elb.amazonaws.com:8000"
+USER_PREFIX = "sandy"
+PASSWORD = "12345678"
+
+TOTAL_USERS = 120
+RAMP_UP_DURATION = 300        # seconds, 0 -> TOTAL_USERS
+SUSTAIN_DURATION = 180        # seconds at full load
+RAMP_DOWN_DURATION = 180      # seconds, full load -> 0
+REQUEST_TIMEOUT = 30          # seconds
+
+# Threading lock for safe result recording
+lock = threading.Lock()
 
 @dataclass
-class RequestResult:
+class Result:
+    user: str
+    timestamp: float
     ok: bool
-    status_code: int
-    error: str | None = None
+    status: int
+    error: str | None
 
+results: List[Result] = []
 
-def ensure_test_users(
-    base_url: str,
-    admin_username: str,
-    admin_password: str,
-    user_prefix: str,
-    users: int,
-    password: str,
-) -> None:
-    """
-    Ensure the specified test users exist by calling the admin /admin/users endpoint.
-    """
-    auth = HTTPBasicAuth(admin_username, admin_password)
-    for i in range(1, users + 1):
-        username = f"{user_prefix}{i:03d}"
-        payload = {"username": username, "password": password}
-        resp = requests.post(f"{base_url}/admin/users", json=payload, auth=auth)
-        # 200 -> created, 400 -> already exists
-        if resp.status_code not in (200, 400):
-            print(f"Failed to ensure user {username}: {resp.status_code} {resp.text}")
+# ================= FUNCTIONS =================
 
-
-def user_scenario(
-    base_url: str,
-    username: str,
-    password: str,
-    messages: int,
-) -> List[RequestResult]:
-    auth = HTTPBasicAuth(username, password)
-    results: List[RequestResult] = []
-
-    # Login check
-    resp = requests.get(f"{base_url}/user/auth/check", auth=auth)
-    results.append(
-        RequestResult(
-            ok=resp.status_code == 200,
-            status_code=resp.status_code,
-            error=None if resp.status_code == 200 else resp.text,
+def send_chat(user: str) -> None:
+    """Send a single chat message for a user"""
+    ts = time.time()
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/user/chat",
+            json={"user_id": user, "message": "Load test message"},
+            auth=HTTPBasicAuth(user, PASSWORD),
+            timeout=REQUEST_TIMEOUT,
         )
-    )
-    if resp.status_code != 200:
-        return results
+        ok = resp.status_code == 200
+        err = None if ok else resp.text
+    except Exception as e:
+        ok = False
+        err = str(e)
+        resp = type("Resp", (), {"status_code": 0})()  # dummy
 
-    # Chat messages
-    for i in range(messages):
-        payload = {"user_id": username, "message": f"Test message {i+1} from {username}"}
-        resp = requests.post(f"{base_url}/user/chat", json=payload, auth=auth)
-        results.append(
-            RequestResult(
-                ok=resp.status_code == 200,
-                status_code=resp.status_code,
-                error=None if resp.status_code == 200 else resp.text,
-            )
-        )
-    return results
+    with lock:
+        results.append(Result(user=user, timestamp=ts, ok=ok, status=resp.status_code, error=err))
 
 
-def run_load_test(
-    base_url: str,
-    num_users: int,
-    messages_per_user: int,
-    user_prefix: str,
-    user_password: str,
-) -> List[RequestResult]:
-    usernames = [f"{user_prefix}{i:03d}" for i in range(1, num_users + 1)]
-    all_results: List[RequestResult] = []
-    with ThreadPoolExecutor(max_workers=num_users) as executor:
-        futures = [
-            executor.submit(
-                user_scenario,
-                base_url,
-                username,
-                user_password,
-                messages_per_user,
-            )
-            for username in usernames
-        ]
-        for fut in as_completed(futures):
-            all_results.extend(fut.result())
-    return all_results
+def run_phase(users: List[str], concurrency: int, duration_seconds: int, phase_name: str) -> None:
+    print(f"\n▶ Phase: {phase_name} | concurrency={concurrency} | duration={duration_seconds}s")
+    end_time = time.time() + duration_seconds
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        while time.time() < end_time:
+            futures = [executor.submit(send_chat, user) for user in users[:concurrency]]
+            for _ in as_completed(futures):
+                pass
+            time.sleep(1)  # 1-second pacing between batches
 
 
-def summarize_results(results: List[RequestResult]) -> None:
-    if not results:
-        print("No requests were executed.")
+def ramp(users: List[str], start: int, end: int, duration_seconds: int, phase_name: str) -> None:
+    """Gradually ramp user concurrency from start -> end over duration"""
+    print(f"\n▶ Ramp phase: {phase_name} | {start} -> {end} users over {duration_seconds}s")
+    steps = end - start
+    if steps <= 0:
         return
 
-    successes = [r for r in results if r.ok]
-    failures = [r for r in results if not r.ok]
+    interval = duration_seconds / steps
+    current = start
+    while current < end:
+        run_phase(users, concurrency=current, duration_seconds=int(interval), phase_name=f"{phase_name} step {current}")
+        current += 1
 
-    print("\n=== Load Test Summary ===")
-    print(f"Total requests: {len(results)}")
-    print(f"Successful: {len(successes)}")
-    print(f"Failed: {len(failures)}")
-    if failures:
+
+def summarize() -> None:
+    total = len(results)
+    success = sum(1 for r in results if r.ok)
+    failed = total - success
+
+    print("\n=== LOAD TEST SUMMARY ===")
+    print(f"Total requests sent : {TOTAL_USERS}")
+    print(f"Responses received  : {total}")
+    print(f"Successful          : {success}")
+    print(f"Failed              : {failed}")
+
+    if failed:
         print("\nSample failures (up to 5):")
-        for r in failures[:5]:
-            print(f"  status={r.status_code} error={r.error!r}")
+        for r in results[:5]:
+            if not r.ok:
+                print(f"User={r.user} status={r.status} error={r.error}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Load test the RAG chatbot backend.")
-    parser.add_argument(
-        "--base-url",
-        default="http://127.0.0.1:8000",
-        help="Base URL of the FastAPI backend.",
-    )
-    parser.add_argument(
-        "--num-users",
-        type=int,
-        default=20,
-        help="Number of concurrent users to simulate.",
-    )
-    parser.add_argument(
-        "--messages-per-user",
-        type=int,
-        default=3,
-        help="Number of chat messages per simulated user.",
-    )
-    parser.add_argument(
-        "--user-prefix",
-        default="loadtest_user_",
-        help="Prefix for test usernames.",
-    )
-    parser.add_argument(
-        "--user-password",
-        default="test123",
-        help="Password to use for all test users.",
-    )
-    parser.add_argument(
-        "--admin-username",
-        help="Admin username for creating test users via /admin/users.",
-    )
-    parser.add_argument(
-        "--admin-password",
-        help="Admin password for creating test users via /admin/users.",
-    )
-    parser.add_argument(
-        "--ensure-users",
-        action="store_true",
-        help="If set, create test users via admin API before running the test.",
-    )
-    args = parser.parse_args()
-
-    if args.ensure_users:
-        if not args.admin_username or not args.admin_password:
-            raise SystemExit(
-                "--ensure-users requires --admin-username and --admin-password"
-            )
-        print(
-            f"Ensuring {args.num_users} test users exist via admin API at {args.base_url}..."
-        )
-        ensure_test_users(
-            args.base_url,
-            args.admin_username,
-            args.admin_password,
-            args.user_prefix,
-            args.num_users,
-            args.user_password,
-        )
-
-    print(
-        f"Running load test: {args.num_users} users, "
-        f"{args.messages_per_user} messages each, base URL={args.base_url}"
-    )
-    results = run_load_test(
-        args.base_url,
-        args.num_users,
-        args.messages_per_user,
-        args.user_prefix,
-        args.user_password,
-    )
-    print("Completed load test.")
-    summarize_results(results)
-
-
+# ================= MAIN =================
 if __name__ == "__main__":
-    main()
+    users = [f"{USER_PREFIX}{i:03d}" for i in range(1, TOTAL_USERS + 1)]
 
+    start_time = time.time()
 
+    # 1️⃣ Ramp up from 0 -> TOTAL_USERS
+    ramp(users, start=1, end=TOTAL_USERS, duration_seconds=RAMP_UP_DURATION, phase_name="RAMP UP")
+
+    # 2️⃣ Sustained high load
+    run_phase(users, concurrency=TOTAL_USERS, duration_seconds=SUSTAIN_DURATION, phase_name="SUSTAIN HIGH LOAD")
+
+    # 3️⃣ Ramp down from TOTAL_USERS -> 0
+    ramp(users, start=TOTAL_USERS, end=0, duration_seconds=RAMP_DOWN_DURATION, phase_name="RAMP DOWN")
+
+    # 4️⃣ Summarize
+    summarize()
+
+    end_time = time.time()
+    print(f"\nTest completed in {end_time - start_time:.2f} seconds")
